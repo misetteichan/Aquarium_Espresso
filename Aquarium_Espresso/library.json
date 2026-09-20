@@ -1,0 +1,11 @@
+{
+  "name": "AquariumEspressoCore",
+  "version": "0.0.0",
+  "build": {
+    "srcDir": ".",
+    "srcFilter": [
+      "+<*.cpp>",
+      "-<m5port/>"
+    ]
+  }
+}
