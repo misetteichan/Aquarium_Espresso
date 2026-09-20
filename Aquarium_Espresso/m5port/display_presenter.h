@@ -50,6 +50,7 @@ class AquariumDisplayPresenter {
   float baseScale() const;
   float effectiveScale() const;
   void updateMapping();
+  bool isIdentityMapping() const;
 
   AquariumDisplayConfig config_{};
   int width_ = 0;

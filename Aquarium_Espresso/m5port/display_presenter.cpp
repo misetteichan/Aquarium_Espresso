@@ -60,6 +60,16 @@ bool AquariumDisplayPresenter::begin(const AquariumDisplayConfig& config) {
   height_ = M5.Display.height();
   if (width_ <= 0 || height_ <= 0) return false;
 
+  updateMapping();
+
+  // 320x240 M5 devices (Core2/CoreS3/etc.) can present the canonical
+  // framebuffer directly.  Do not allocate a second 153.6 KB frame just to
+  // resample every pixel at scale 1.0.
+  if (isIdentityMapping()) {
+    Serial.println("presenter: identity fast path (no resample buffer)");
+    return true;
+  }
+
   const size_t count = (size_t)width_ * height_;
   const size_t bytes = count * sizeof(lgfx::rgb565_t);
   output_ = (lgfx::rgb565_t*)heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -71,7 +81,7 @@ bool AquariumDisplayPresenter::begin(const AquariumDisplayConfig& config) {
     return false;
   }
 
-  updateMapping();
+  Serial.printf("presenter: resample buffer %u bytes\n", (unsigned)bytes);
   return true;
 }
 
@@ -107,6 +117,14 @@ void AquariumDisplayPresenter::updateMapping() {
   sourceTop_ = (FB_H - spanH) * 0.5f;
 }
 
+bool AquariumDisplayPresenter::isIdentityMapping() const {
+  constexpr float kTolerance = 0.0001f;
+  return width_ == FB_W && height_ == FB_H
+      && fabsf(scale_ - 1.0f) < kTolerance
+      && fabsf(sourceLeft_) < kTolerance
+      && fabsf(sourceTop_) < kTolerance;
+}
+
 AquariumViewportInfo AquariumDisplayPresenter::viewport() const {
   AquariumViewportInfo v{};
   v.scale = scale_;
@@ -120,7 +138,18 @@ AquariumViewportInfo AquariumDisplayPresenter::viewport() const {
 }
 
 bool AquariumDisplayPresenter::present(const uint16_t* framebuffer) {
-  if (!framebuffer || !output_ || width_ <= 0 || height_ <= 0) return false;
+  if (!framebuffer || width_ <= 0 || height_ <= 0) return false;
+
+  if (isIdentityMapping()) {
+    // FB is native, non-swapped RGB565.  Use M5GFX's typed overload so the
+    // library handles the panel transport/color ordering without touching the
+    // framebuffer.
+    M5.Display.pushImage(0, 0, FB_W, FB_H,
+                         reinterpret_cast<const lgfx::rgb565_t*>(framebuffer));
+    return true;
+  }
+
+  if (!output_) return false;
 
   const float invScale = 1.0f / scale_;
   for (int y = 0; y < height_; ++y) {
