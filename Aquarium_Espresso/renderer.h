@@ -5,7 +5,6 @@
 // ---------------------------------------------------------------------------
 #include "sim.h"
 #include "gfx.h"
-#include "lgfx_setup.h"
 
 // compose rows [y0,y1) of the frame into FB
 void renderBand(const Sim& sim, int y0, int y1);
