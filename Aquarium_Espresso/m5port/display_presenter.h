@@ -45,6 +45,7 @@ class AquariumDisplayPresenter {
   int width() const { return width_; }
   int height() const { return height_; }
   AquariumViewportInfo viewport() const;
+  bool usesIdentityMapping() const { return isIdentityMapping(); }
 
  private:
   float baseScale() const;

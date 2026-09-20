@@ -32,6 +32,10 @@ Sim sim;
 AquariumDisplayPresenter presenter;
 AquariumDisplayConfig displayConfig;
 float autoTap = 4.0f;
+bool framebufferDmaCapable = false;
+bool bandDmaEnabled = false;
+bool stagedBandDma = false;
+lgfx::swap565_t* dmaBandBuffer[2] = {nullptr, nullptr};
 
 constexpr int BANDS = 5;
 constexpr float SPLIT = 0.50f;
@@ -66,6 +70,20 @@ void renderBandPortable(const Sim& state, int y0, int y1) {
   }
 #endif
   renderBand(state, y0, y1);
+}
+
+void copyBandSwapped(int y0, int y1, lgfx::swap565_t* dst) {
+  const uint32_t* src = reinterpret_cast<const uint32_t*>(
+      FB + (size_t)y0 * FB_W);
+  uint32_t* out = reinterpret_cast<uint32_t*>(dst);
+  const size_t words = (size_t)(y1 - y0) * FB_W / 2;
+
+  // Swap the two bytes of each RGB565 pixel while copying from PSRAM into
+  // DMA-capable internal RAM. Two pixels are handled per 32-bit operation.
+  for (size_t i = 0; i < words; ++i) {
+    const uint32_t v = src[i];
+    out[i] = ((v >> 8) & 0x00FF00FFu) | ((v << 8) & 0xFF00FF00u);
+  }
 }
 
 [[noreturn]] void fatal(const char* message) {
@@ -138,8 +156,10 @@ void setup() {
   const size_t fbBytes = (size_t)FB_W * FB_H * sizeof(uint16_t);
   FB = (uint16_t*)heap_caps_malloc(
       fbBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+  framebufferDmaCapable = FB != nullptr;
   if (!FB) {
-    FB = (uint16_t*)heap_caps_malloc(fbBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    FB = (uint16_t*)heap_caps_malloc(
+        fbBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     Serial.println("framebuffer: PSRAM fallback");
   }
   if (!FB) fatal("no canonical framebuffer");
@@ -171,6 +191,36 @@ void setup() {
                 FB_W, FB_H, vp.displayW, vp.displayH, vp.scale,
                 vp.sourceX, vp.sourceY, vp.sourceW, vp.sourceH);
 
+  // Reuse the original five-band DMA overlap on a 1:1 display. If the full
+  // framebuffer had to fall back to PSRAM (common on Core2 after M5Unified has
+  // initialized), use two 30 KB DMA staging bands in internal RAM instead of
+  // giving up on overlap entirely.
+  if (presenter.usesIdentityMapping() && !framebufferDmaCapable) {
+    constexpr size_t bandBytes =
+        (size_t)FB_W * (SCR_H / BANDS) * sizeof(lgfx::swap565_t);
+    dmaBandBuffer[0] = (lgfx::swap565_t*)heap_caps_malloc(
+        bandBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    dmaBandBuffer[1] = (lgfx::swap565_t*)heap_caps_malloc(
+        bandBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    if (!dmaBandBuffer[0] || !dmaBandBuffer[1]) {
+      if (dmaBandBuffer[0]) heap_caps_free(dmaBandBuffer[0]);
+      if (dmaBandBuffer[1]) heap_caps_free(dmaBandBuffer[1]);
+      dmaBandBuffer[0] = dmaBandBuffer[1] = nullptr;
+    } else {
+      stagedBandDma = true;
+    }
+  }
+
+  bandDmaEnabled =
+      presenter.usesIdentityMapping() && (framebufferDmaCapable || stagedBandDma);
+
+  const char* transport = "presenter";
+  if (bandDmaEnabled) {
+    transport = stagedBandDma ? "5-band DMA overlap (staged)"
+                              : "5-band DMA overlap (direct)";
+  }
+  Serial.printf("present transport: %s\n", transport);
+
   initRendererWorker();
 }
 
@@ -199,13 +249,72 @@ void loop() {
   lightStep(dt);
   stepSim(sim, dt);
 
-  for (int band = 0; band < BANDS; ++band) {
-    const int y0 = band * SCR_H / BANDS;
-    const int y1 = (band + 1) * SCR_H / BANDS;
-    renderBandPortable(sim, y0, y1);
+  static bool displayWriteOpen = false;
+  static int stageBase = 0;
+
+  if (bandDmaEnabled) {
+    // Draw band 0 while the previous frame's final band is still on the wire.
+    renderBandPortable(sim, 0, SCR_H / BANDS);
+
+    // With staging buffers, alternate the first buffer every frame. Because
+    // there are five bands, the previous frame's last transfer then uses the
+    // opposite buffer, so band 0 can be prepared before waiting for that DMA.
+    if (stagedBandDma) {
+      stageBase ^= 1;
+      copyBandSwapped(0, SCR_H / BANDS, dmaBandBuffer[stageBase]);
+    }
+
+    // Wait only when the SPI bus is needed for the new frame.
+    if (displayWriteOpen) {
+      M5.Display.endWrite();
+      displayWriteOpen = false;
+    }
+
+    M5.Display.startWrite();
+    displayWriteOpen = true;
+
+    for (int band = 0; band < BANDS; ++band) {
+      const int y0 = band * SCR_H / BANDS;
+      const int y1 = (band + 1) * SCR_H / BANDS;
+
+      const lgfx::swap565_t* pixels;
+      if (stagedBandDma) {
+        pixels = dmaBandBuffer[(stageBase + band) & 1];
+      } else {
+        // Direct-DMA case: same transport trick as upstream. lightApply()
+        // completely restores this band before the next frame renders it.
+        fbSwapBand(y0, y1);
+        pixels = reinterpret_cast<const lgfx::swap565_t*>(
+            FB + (size_t)y0 * FB_W);
+      }
+
+      M5.Display.pushImageDMA(0, y0, FB_W, y1 - y0, pixels);
+
+      // Render and, when needed, stage the next band while this one is on the
+      // wire. pushImageDMA() will wait for the current DMA before starting the
+      // following transfer, so each staging buffer is safe to reuse two bands
+      // later.
+      if (band + 1 < BANDS) {
+        const int nextY0 = y1;
+        const int nextY1 = (band + 2) * SCR_H / BANDS;
+        renderBandPortable(sim, nextY0, nextY1);
+        if (stagedBandDma) {
+          copyBandSwapped(
+              nextY0, nextY1,
+              dmaBandBuffer[(stageBase + band + 1) & 1]);
+        }
+      }
+    }
+  } else {
+    // Scaling/cropping needs the complete canonical frame first.
+    for (int band = 0; band < BANDS; ++band) {
+      const int y0 = band * SCR_H / BANDS;
+      const int y1 = (band + 1) * SCR_H / BANDS;
+      renderBandPortable(sim, y0, y1);
+    }
+    presenter.present(FB);
   }
 
-  presenter.present(FB);
   ++frames;
 
   if (millis() - fpsTime >= 5000) {
