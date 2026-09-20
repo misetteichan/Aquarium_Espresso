@@ -13,8 +13,8 @@ namespace VIEW {
   // is remapped onto the panel through ymap(). Move SWIM_TOP / SWIM_BOT to
   // re-frame how much of the photo the fish roam over - nothing else needs to
   // change.
-  static const float SWIM_TOP = 30.0f;
-  static const float SWIM_BOT = 205.0f;
+  static constexpr float SWIM_TOP = 30.0f;
+  static constexpr float SWIM_BOT = 205.0f;
   static constexpr float ymap(float v) {
     return SWIM_TOP + (v - 26.0f) * ((SWIM_BOT - SWIM_TOP) / 94.0f);
   }
