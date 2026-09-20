@@ -1,5 +1,6 @@
 # Arduino build output
 build/
+.pio/
 *.bin
 *.elf
 *.map
