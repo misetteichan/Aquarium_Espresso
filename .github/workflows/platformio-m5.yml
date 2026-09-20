@@ -1,0 +1,20 @@
+name: PlatformIO M5 port
+
+on:
+  push:
+    branches: [m5port]
+  pull_request:
+    branches: [m5port]
+
+jobs:
+  build-atoms3r:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Install PlatformIO
+        run: pip install platformio
+      - name: Build AtomS3R
+        run: pio run -e atoms3r
