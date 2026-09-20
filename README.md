@@ -73,3 +73,10 @@ Copyright of this project belongs to mochimochi-man / Uh (X : calorie0).
 It is MIT licensed, so please feel free to use it.
 
 The bundled images were generated with AI, using Grok and Gemini.
+
+## M5Stack / PlatformIO port
+
+The `m5port` branch contains a PlatformIO + M5Unified port that keeps the
+original 320x240 simulation/rendering space and adapts only the physical display
+presentation layer. See [README.m5port.md](README.m5port.md) for architecture,
+build instructions, and supported targets.
